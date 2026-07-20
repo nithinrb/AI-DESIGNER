@@ -1,6 +1,8 @@
-# React + Vite
+# AI Interior Designer Platform
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+**Live Demo:** [https://ai-interior-designer-phi.vercel.app/](https://ai-interior-designer-phi.vercel.app/)
+
+This is a full-stack enterprise-grade AI Interior Designer web application.
 
 Currently, two official plugins are available:
 
