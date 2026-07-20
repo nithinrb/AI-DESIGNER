@@ -19,8 +19,12 @@
       "dest": "/backend/api/index.py"
     },
     {
-      "src": "/(.*)",
+      "src": "/(.*\\.(?:js|css|svg|png|jpg|jpeg|ico|json|map))$",
       "dest": "/frontend/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/frontend/index.html"
     }
   ]
 }
