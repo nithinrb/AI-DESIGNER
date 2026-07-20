@@ -1,6 +1,6 @@
 from app.utils.db import db
 from bson.objectid import ObjectId
-import bcrypt
+from werkzeug.security import generate_password_hash, check_password_hash
 
 class User:
     @staticmethod
@@ -9,10 +9,10 @@ class User:
 
     @staticmethod
     def create(email, password, name):
-        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        hashed_password = generate_password_hash(password)
         user_data = {
             'email': email,
-            'password': hashed_password.decode('utf-8'),
+            'password': hashed_password,
             'name': name
         }
         result = User.get_collection().insert_one(user_data)
@@ -28,4 +28,4 @@ class User:
 
     @staticmethod
     def verify_password(password, hashed_password):
-        return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
+        return check_password_hash(hashed_password, password)
