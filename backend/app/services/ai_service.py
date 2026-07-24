@@ -60,8 +60,13 @@ class AIAnalysisService:
         """
         print("[AI Service] Connecting to Cloud API (In-Memory Processing)...")
 
+        # 1. Check for Generative AI API Key
+        api_key = os.environ.get('STABILITY_API_KEY')
+        if not api_key:
+            raise EnvironmentError("AI generation is unavailable: Missing STABILITY_API_KEY in .env file. Please add your key to enable 10-second AI generation.")
+
         try:
-            # 1. Read and analyze the original image for basic stats
+            # 2. Read and analyze the original image for basic stats
             img = Image.open(BytesIO(image_bytes)).convert('RGB')
             img_array = np.array(img)
             avg_brightness = np.mean(img_array)
@@ -88,28 +93,59 @@ class AIAnalysisService:
             furniture_prompt = ", ".join([item['name'] for item in featured_items])
             print(f"[AI Service] Prompt Injecting Catalog Items: {furniture_prompt}")
             
-            # 2. Call Pollinations.ai API (100% Free, No API Key needed)
-            print("[AI Service] Sending request to Pollinations.ai (Free Text-to-Image)...")
+            # 3. Prepare Image for API (SDXL strictly requires EXACT whitelist dimensions like 1024x1024)
+            w, h = img.size
+            min_dim = min(w, h)
+            left = (w - min_dim) / 2
+            top = (h - min_dim) / 2
+            right = (w + min_dim) / 2
+            bottom = (h + min_dim) / 2
+            img = img.crop((left, top, right, bottom))
+            img = img.resize((1024, 1024), Image.Resampling.LANCZOS)
             
-            import urllib.parse
-            prompt = f"Breathtaking professional interior design of a {style_preference} room, fully furnished featuring {furniture_prompt}, luxurious staging, cinematic lighting, 8k resolution, masterpiece, photorealistic"
-            encoded_prompt = urllib.parse.quote(prompt)
+            # Save to buffer
+            buffered = BytesIO()
+            img.save(buffered, format="PNG")
+            buffered.seek(0)
             
-            # Pollinations returns the image directly
-            url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+            print("[AI Service] Sending request to Stability AI Cloud...")
             
-            import time
-            start_time = time.time()
-            response = requests.get(url)
-            
+            # 4. Call Stability AI REST API
+            response = requests.post(
+                f"{self.api_host}/v1/generation/{self.engine_id}/image-to-image",
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {api_key}"
+                },
+                files={
+                    "init_image": buffered
+                },
+                data={
+                    "image_strength": 0.25, # Back down to 0.25 so it actually adds furniture
+                    "init_image_mode": "IMAGE_STRENGTH",
+                    "text_prompts[0][text]": f"Breathtaking professional interior design of a {style_preference} room, perfectly preserve original room layout, exact same camera angle, exact same architecture, fully furnished featuring {furniture_prompt}, luxurious staging, cinematic lighting, 8k resolution, Architectural Digest magazine cover, masterpiece, photorealistic",
+                    "text_prompts[0][weight]": 1.0,
+                    "text_prompts[1][text]": "altered architecture, changed room shape, different camera angle, empty room, barren, unfurnished, low quality, ugly, blurry, poorly drawn, distorted, messy, unrealistic",
+                    "text_prompts[1][weight]": -1.0,
+                    "cfg_scale": 12, # Increased to 12 to heavily force obedience to the "preserve camera angle" prompt
+                    "samples": 1,
+                    "steps": 40, # 40 steps for ultra-high quality
+                }
+            )
+
             if response.status_code != 200:
-                raise RuntimeError(f"Pollinations API rejected the request. (Status {response.status_code})")
-                
-            # 3. Fetch the resulting image and encode as base64 so it matches the frontend expectations
-            final_base64 = base64.b64encode(response.content).decode('utf-8')
-            output_image_url = f"data:image/jpeg;base64,{final_base64}"
+                error_msg = response.text
+                print(f"[AI Service] API Error: {error_msg}")
+                raise RuntimeError(f"Cloud API rejected the request. Check your API key and balance. (Status {response.status_code})")
+
+            data = response.json()
             
-            print(f"[AI Service] Cloud generation successful via Pollinations.ai in {time.time() - start_time:.2f} seconds!")
+            # 5. Extract Base64 directly for Vercel compatibility
+            base64_image = data["artifacts"][0]["base64"]
+            
+            # Instead of saving to disk (which fails on Vercel), return Data URI
+            output_image_url = f"data:image/png;base64,{base64_image}"
+            print("[AI Service] Cloud generation successful!")
             
         except Exception as e:
             print(f"Exception during cloud inference: {e}")
