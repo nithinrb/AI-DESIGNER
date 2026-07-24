@@ -60,10 +60,10 @@ class AIAnalysisService:
         """
         print("[AI Service] Connecting to Cloud API (In-Memory Processing)...")
 
-        # 1. Check for Generative AI API Key
-        api_key = os.environ.get('STABILITY_API_KEY')
+        # 1. Check for Replicate API Key
+        api_key = os.environ.get('REPLICATE_API_TOKEN')
         if not api_key:
-            raise EnvironmentError("AI generation is unavailable: Missing STABILITY_API_KEY in .env file. Please add your key to enable 10-second AI generation.")
+            raise EnvironmentError("AI generation is unavailable: Missing REPLICATE_API_TOKEN in Vercel environment variables. Please add your Replicate token.")
 
         try:
             # 2. Read and analyze the original image for basic stats
@@ -93,7 +93,7 @@ class AIAnalysisService:
             furniture_prompt = ", ".join([item['name'] for item in featured_items])
             print(f"[AI Service] Prompt Injecting Catalog Items: {furniture_prompt}")
             
-            # 3. Prepare Image for API (SDXL strictly requires EXACT whitelist dimensions like 1024x1024)
+            # 3. Prepare Image for API
             w, h = img.size
             min_dim = min(w, h)
             left = (w - min_dim) / 2
@@ -103,49 +103,67 @@ class AIAnalysisService:
             img = img.crop((left, top, right, bottom))
             img = img.resize((1024, 1024), Image.Resampling.LANCZOS)
             
-            # Save to buffer
+            # Save to buffer and create base64 Data URI
             buffered = BytesIO()
             img.save(buffered, format="PNG")
-            buffered.seek(0)
+            image_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            data_uri = f"data:image/png;base64,{image_base64}"
             
-            print("[AI Service] Sending request to Stability AI Cloud...")
+            print("[AI Service] Sending request to Replicate Cloud...")
             
-            # 4. Call Stability AI REST API
-            response = requests.post(
-                f"{self.api_host}/v1/generation/{self.engine_id}/image-to-image",
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {api_key}"
-                },
-                files={
-                    "init_image": buffered
-                },
-                data={
-                    "image_strength": 0.25, # Back down to 0.25 so it actually adds furniture
-                    "init_image_mode": "IMAGE_STRENGTH",
-                    "text_prompts[0][text]": f"Breathtaking professional interior design of a {style_preference} room, perfectly preserve original room layout, exact same camera angle, exact same architecture, fully furnished featuring {furniture_prompt}, luxurious staging, cinematic lighting, 8k resolution, Architectural Digest magazine cover, masterpiece, photorealistic",
-                    "text_prompts[0][weight]": 1.0,
-                    "text_prompts[1][text]": "altered architecture, changed room shape, different camera angle, empty room, barren, unfurnished, low quality, ugly, blurry, poorly drawn, distorted, messy, unrealistic",
-                    "text_prompts[1][weight]": -1.0,
-                    "cfg_scale": 12, # Increased to 12 to heavily force obedience to the "preserve camera angle" prompt
-                    "samples": 1,
-                    "steps": 40, # 40 steps for ultra-high quality
+            # 4. Call Replicate API
+            headers = {
+                "Authorization": f"Token {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            prediction_data = {
+                "version": "39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b", # SDXL 1.0
+                "input": {
+                    "prompt": f"Breathtaking professional interior design of a {style_preference} room, perfectly preserve original room layout, exact same camera angle, exact same architecture, fully furnished featuring {furniture_prompt}, luxurious staging, cinematic lighting, 8k resolution, masterpiece, photorealistic",
+                    "negative_prompt": "altered architecture, changed room shape, different camera angle, empty room, barren, unfurnished, low quality, ugly, blurry, poorly drawn, distorted, messy, unrealistic",
+                    "image": data_uri,
+                    "prompt_strength": 0.75,
+                    "num_inference_steps": 25 # Lowered to 25 to ensure fast response (Vercel has a 10s timeout on hobby tier)
                 }
+            }
+            
+            response = requests.post(
+                "https://api.replicate.com/v1/predictions",
+                headers=headers,
+                json=prediction_data
             )
-
-            if response.status_code != 200:
-                error_msg = response.text
-                print(f"[AI Service] API Error: {error_msg}")
-                raise RuntimeError(f"Cloud API rejected the request. Check your API key and balance. (Status {response.status_code})")
-
-            data = response.json()
             
-            # 5. Extract Base64 directly for Vercel compatibility
-            base64_image = data["artifacts"][0]["base64"]
+            if response.status_code != 201:
+                raise RuntimeError(f"Replicate API rejected the request. Check your API key. (Status {response.status_code}): {response.text}")
+                
+            prediction = response.json()
+            get_url = prediction["urls"]["get"]
             
-            # Instead of saving to disk (which fails on Vercel), return Data URI
-            output_image_url = f"data:image/png;base64,{base64_image}"
-            print("[AI Service] Cloud generation successful!")
+            # 5. Poll for completion
+            output_url = None
+            for _ in range(15): # Max 15 loops (approx 15 seconds)
+                import time
+                time.sleep(1)
+                poll_resp = requests.get(get_url, headers=headers)
+                poll_data = poll_resp.json()
+                status = poll_data.get("status")
+                
+                if status == "succeeded":
+                    output_url = poll_data["output"][0]
+                    break
+                elif status == "failed":
+                    raise RuntimeError("Replicate AI generation failed.")
+            
+            if not output_url:
+                raise RuntimeError("AI Generation timed out after 15 seconds.")
+                
+            # Fetch the resulting image and encode as base64 so it matches the frontend expectations
+            final_img_resp = requests.get(output_url)
+            final_base64 = base64.b64encode(final_img_resp.content).decode('utf-8')
+            output_image_url = f"data:image/png;base64,{final_base64}"
+            
+            print("[AI Service] Cloud generation successful via Replicate!")
             
         except Exception as e:
             print(f"Exception during cloud inference: {e}")
