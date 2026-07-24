@@ -60,13 +60,8 @@ class AIAnalysisService:
         """
         print("[AI Service] Connecting to Cloud API (In-Memory Processing)...")
 
-        # 1. Check for Replicate API Key
-        api_key = os.environ.get('REPLICATE_API_TOKEN')
-        if not api_key:
-            raise EnvironmentError("AI generation is unavailable: Missing REPLICATE_API_TOKEN in Vercel environment variables. Please add your Replicate token.")
-
         try:
-            # 2. Read and analyze the original image for basic stats
+            # 1. Read and analyze the original image for basic stats
             img = Image.open(BytesIO(image_bytes)).convert('RGB')
             img_array = np.array(img)
             avg_brightness = np.mean(img_array)
@@ -93,77 +88,28 @@ class AIAnalysisService:
             furniture_prompt = ", ".join([item['name'] for item in featured_items])
             print(f"[AI Service] Prompt Injecting Catalog Items: {furniture_prompt}")
             
-            # 3. Prepare Image for API
-            w, h = img.size
-            min_dim = min(w, h)
-            left = (w - min_dim) / 2
-            top = (h - min_dim) / 2
-            right = (w + min_dim) / 2
-            bottom = (h + min_dim) / 2
-            img = img.crop((left, top, right, bottom))
-            img = img.resize((1024, 1024), Image.Resampling.LANCZOS)
+            # 2. Call Pollinations.ai API (100% Free, No API Key needed)
+            print("[AI Service] Sending request to Pollinations.ai (Free Text-to-Image)...")
             
-            # Save to buffer and create base64 Data URI
-            buffered = BytesIO()
-            img.save(buffered, format="PNG")
-            image_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            data_uri = f"data:image/png;base64,{image_base64}"
+            import urllib.parse
+            prompt = f"Breathtaking professional interior design of a {style_preference} room, fully furnished featuring {furniture_prompt}, luxurious staging, cinematic lighting, 8k resolution, masterpiece, photorealistic"
+            encoded_prompt = urllib.parse.quote(prompt)
             
-            print("[AI Service] Sending request to Replicate Cloud...")
+            # Pollinations returns the image directly
+            url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
             
-            # 4. Call Replicate API
-            headers = {
-                "Authorization": f"Token {api_key}",
-                "Content-Type": "application/json"
-            }
+            import time
+            start_time = time.time()
+            response = requests.get(url)
             
-            prediction_data = {
-                "version": "39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b", # SDXL 1.0
-                "input": {
-                    "prompt": f"Breathtaking professional interior design of a {style_preference} room, perfectly preserve original room layout, exact same camera angle, exact same architecture, fully furnished featuring {furniture_prompt}, luxurious staging, cinematic lighting, 8k resolution, masterpiece, photorealistic",
-                    "negative_prompt": "altered architecture, changed room shape, different camera angle, empty room, barren, unfurnished, low quality, ugly, blurry, poorly drawn, distorted, messy, unrealistic",
-                    "image": data_uri,
-                    "prompt_strength": 0.75,
-                    "num_inference_steps": 25 # Lowered to 25 to ensure fast response (Vercel has a 10s timeout on hobby tier)
-                }
-            }
-            
-            response = requests.post(
-                "https://api.replicate.com/v1/predictions",
-                headers=headers,
-                json=prediction_data
-            )
-            
-            if response.status_code != 201:
-                raise RuntimeError(f"Replicate API rejected the request. Check your API key. (Status {response.status_code}): {response.text}")
+            if response.status_code != 200:
+                raise RuntimeError(f"Pollinations API rejected the request. (Status {response.status_code})")
                 
-            prediction = response.json()
-            get_url = prediction["urls"]["get"]
+            # 3. Fetch the resulting image and encode as base64 so it matches the frontend expectations
+            final_base64 = base64.b64encode(response.content).decode('utf-8')
+            output_image_url = f"data:image/jpeg;base64,{final_base64}"
             
-            # 5. Poll for completion
-            output_url = None
-            for _ in range(15): # Max 15 loops (approx 15 seconds)
-                import time
-                time.sleep(1)
-                poll_resp = requests.get(get_url, headers=headers)
-                poll_data = poll_resp.json()
-                status = poll_data.get("status")
-                
-                if status == "succeeded":
-                    output_url = poll_data["output"][0]
-                    break
-                elif status == "failed":
-                    raise RuntimeError("Replicate AI generation failed.")
-            
-            if not output_url:
-                raise RuntimeError("AI Generation timed out after 15 seconds.")
-                
-            # Fetch the resulting image and encode as base64 so it matches the frontend expectations
-            final_img_resp = requests.get(output_url)
-            final_base64 = base64.b64encode(final_img_resp.content).decode('utf-8')
-            output_image_url = f"data:image/png;base64,{final_base64}"
-            
-            print("[AI Service] Cloud generation successful via Replicate!")
+            print(f"[AI Service] Cloud generation successful via Pollinations.ai in {time.time() - start_time:.2f} seconds!")
             
         except Exception as e:
             print(f"Exception during cloud inference: {e}")
